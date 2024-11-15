@@ -19,21 +19,26 @@ QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 
-# Function to process PDF and split it into chunks
 def process_pdf(pdf_path):
-    """Process the PDF, split it into chunks, and return the chunks."""
+    """Process the PDF, split it into chunks, and return the chunks as Document objects."""
     loader = PyPDFLoader(pdf_path)
     pages = loader.load()
     document_text = "".join([page.page_content for page in pages])
 
     # Split the document into chunks
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=300,  # Adjust as needed
-        chunk_overlap=40  # Adjust as needed
+        chunk_size=300,
+        chunk_overlap=40
     )
     chunks = text_splitter.create_documents([document_text])
 
+    # Ensure metadata is initialized for all chunks
+    for chunk in chunks:
+        if not chunk.metadata:
+            chunk.metadata = {}
+
     return chunks
+
 
 
 # Function to send document chunks (with embeddings) to the Qdrant vector database
@@ -70,33 +75,44 @@ def qdrant_client():
     return qdrant_store
 
 
-# Function to handle question answering using the Qdrant vector store and GPT
-def qa_ret(qdrant_store, input_query):
-    """Retrieve relevant documents and generate a response from the AI model."""
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+
+def qa_ret(qdrant_store, input_query, pdf_id=None):
+    """
+    Retrieve relevant documents and generate a response from the AI model.
+    Supports optional filtering based on pdf_id in nested metadata.
+    """
     try:
+        # Template for response generation
         template = """
-        Instructions:
-            You are trained to extract answers from the given Context and the User's Question. Your response must be based on semantic understanding, which means even if the wording is not an exact match, infer the closest possible meaning from the Context. 
+        Context:
+        {context}
 
-            Key Points to Follow:
-            - **Precise Answer Length**: The answer must be between a minimum of 40 words and a maximum of 100 words.
-            - **Strict Answering Rules**: Do not include any unnecessary text. The answer should be concise and focused directly on the question.
-            - **Professional Language**: Do not use any abusive or prohibited language. Always respond in a polite and gentle tone.
-            - **No Personal Information Requests**: Do not ask for personal information from the user at any point.
-            - **Concise & Understandable**: Provide the most concise, clear, and understandable answer possible.
-            - **Semantic Similarity**: If exact wording isn’t available in the Context, use your semantic understanding to infer the answer. If there are semantically related phrases, use them to generate a precise response. Use natural language understanding to interpret closely related words or concepts.
-            - **Unavailable Information**: If the answer is genuinely not found in the Context, politely apologize and inform the user that the specific information is not available in the provided context.
+        **Question:** {question}
 
-            Context:
-            {context}
-
-            **User's Question:** {question}
-
-            Respond in a polite, professional, and concise manner.
+        Provide a concise and clear answer based on the context above. If the context does not contain enough information, indicate that politely.
         """
         prompt = ChatPromptTemplate.from_template(template)
+
+        # Setup the filter to search by pdf_id in metadata
+        filters = None
+        if pdf_id:
+            filters = Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.pdf_id", 
+                        match=MatchValue(value=pdf_id)
+                    )
+                ]
+            )
+
+        # Setup retriever with similarity search and pdf_id filter if provided
         retriever = qdrant_store.as_retriever(
-            search_type="similarity", search_kwargs={"k": 4}
+            search_type="similarity",
+            search_kwargs={
+                "k": 4,  # Adjust to the number of results you want
+                "filter": filters  # Apply pdf_id filter here
+            }
         )
 
         setup_and_retrieval = RunnableParallel(
